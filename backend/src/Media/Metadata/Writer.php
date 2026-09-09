@@ -57,23 +57,19 @@ final class Writer
             return [$tagValue];
         }, $writeTags);
 
-        // Extra tags come from a fixed set of nullable fields, so every key is always present
-        // Drop the empty ones before deciding whether to write any.
         $extraTags = array_filter(
             $metadata->getExtraTags(),
-            static fn($tagValue) => null !== $tagValue && '' !== $tagValue
+            static fn(mixed $tagValue): bool => $tagValue !== null && $tagValue !== ''
         );
 
-        if (!empty($extraTags)) {
-            // Vorbiscomment & metaflac require a single string value, so the extra tags are
-            // collapsed into one multiline string.
-            // ID3v2 instead keeps them as TXXX frames, format ['description' => ..., 'data' => ...] rows;
+        if ($extraTags !== []) {
+            // Vorbiscomment & metaflac require one multiline string, ID3v2 needs one TXXX frame per key
             $tagData['text'] = !empty(array_intersect(['vorbiscomment', 'metaflac'], $tagFormats))
                 ? [implode(PHP_EOL, $extraTags)]
                 : array_map(
-                    static fn($tagName, $tagValue) => [
-                        'description' => (string)$tagName,
-                        'data' => (string)$tagValue,
+                    static fn(string $tagName, mixed $tagValue): array => [
+                        'description' => $tagName,
+                        'data' => (string) $tagValue,
                     ],
                     array_keys($extraTags),
                     $extraTags
