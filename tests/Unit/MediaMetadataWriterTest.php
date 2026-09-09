@@ -4,82 +4,85 @@ declare(strict_types=1);
 
 namespace Unit;
 
-use App\Event\Media\WriteMetadata;
-use App\Media\Enums\MetadataTags;
-use App\Media\Metadata;
-use App\Media\Metadata\Writer;
+use App\Entity\Enums\StorageLocationAdapters;
+use App\Entity\Enums\StorageLocationTypes;
+use App\Entity\Repository\StationMediaRepository;
+use App\Entity\StationMedia;
+use App\Entity\StorageLocation;
+use App\Media\MetadataManager;
+use App\Service\PlaylistConfiguration\DummyMediaGenerator;
+use App\Service\PlaylistConfiguration\Schema\MediaEntry;
+use App\Tests\Module;
+use App\Utilities\Types;
 use Codeception\Test\Unit;
+use Doctrine\ORM\EntityManagerInterface;
 use JamesHeinrich\GetID3\GetID3;
+use Symfony\Component\Filesystem\Filesystem;
 
 final class MediaMetadataWriterTest extends Unit
 {
-    private Writer $writer;
+    private const string TEST_ARTIST = 'Test Artist';
+    private const string TEST_TITLE = 'Test Title';
+    private const string TEST_ALBUM = 'Test Album';
 
-    private string $path;
+    private EntityManagerInterface $em;
+    private DummyMediaGenerator $dummyMediaGenerator;
+    private StationMediaRepository $mediaRepo;
+    private MetadataManager $metadataManager;
+
+    private string $storagePath;
+
+    private StorageLocation $storageLocation;
+
+    /** @var StationMedia[] */
+    private array $generatedMedia = [];
+
+    protected function _inject(Module $testsModule): void
+    {
+        $this->em = $testsModule->em;
+
+        $di = $testsModule->container;
+        $this->dummyMediaGenerator = $di->get(DummyMediaGenerator::class);
+        $this->mediaRepo = $di->get(StationMediaRepository::class);
+        $this->metadataManager = $di->get(MetadataManager::class);
+    }
 
     protected function _before(): void
     {
-        $this->writer = new Writer();
+        $this->storagePath = sys_get_temp_dir() . '/azuracast_metadata_writer_' . bin2hex(random_bytes(6));
+        (new Filesystem())->mkdir($this->storagePath);
 
-        $this->path = tempnam(sys_get_temp_dir(), 'azuracast_media_') . '.mp3';
-        file_put_contents($this->path, self::buildSilentMp3());
+        $this->storageLocation = new StorageLocation(
+            StorageLocationTypes::StationMedia,
+            StorageLocationAdapters::Local
+        );
+        $this->storageLocation->path = $this->storagePath;
+
+        $this->em->persist($this->storageLocation);
+        $this->em->flush();
     }
 
     protected function _after(): void
     {
-        @unlink($this->path);
+        foreach ($this->generatedMedia as $media) {
+            $this->em->remove($media);
+        }
+        $this->generatedMedia = [];
+
+        $this->em->remove($this->storageLocation);
+        $this->em->flush();
+        $this->em->clear();
+
+        (new Filesystem())->remove($this->storagePath);
     }
 
-    public function testExtraTagsDoNotPreventKnownTagsFromBeingWritten(): void
+    public function testKnownTagsAreWrittenWhenNoExtraMetadataIsSet(): void
     {
-        $this->write(
-            [
-                MetadataTags::Title->value => 'Test Title',
-                MetadataTags::Artist->value => 'Test Artist',
-            ],
-            [
-                'amplify' => null,
-                'cross_start_next' => null,
-                'cue_in' => 1.5,
-                'cue_out' => null,
-                'fade_in' => null,
-                'fade_out' => 2.5,
-            ]
-        );
+        $media = $this->generateMedia();
 
-        $tags = $this->readTags();
-
-        self::assertSame(['Test Title'], $tags['title'] ?? null);
-        self::assertSame(['Test Artist'], $tags['artist'] ?? null);
-    }
-
-    public function testExtraTagsAreWrittenAsIndividualTxxxFramesWhenFilled(): void
-    {
-        $this->write(
-            [MetadataTags::Title->value => 'Test Title'],
-            [
-                'amplify' => null,
-                'cross_start_next' => null,
-                'cue_in' => 1.5,
-                'cue_out' => null,
-                'fade_in' => null,
-                'fade_out' => 2.5,
-            ]
-        );
-
+        // A media row without any cue/fade values still exports every extra metadata key, just with
+        // null values, so the writer must cope with an extra tag set that is never empty.
         self::assertSame(
-            [
-                'cue_in' => '1.5',
-                'fade_out' => '2.5',
-            ],
-            $this->readTags()['text'] ?? null
-        );
-    }
-
-    public function testEmptyExtraTagsWriteNoTxxxFrames(): void
-    {
-        $this->write(
-            [MetadataTags::Title->value => 'Test Title'],
             [
                 'amplify' => null,
                 'cross_start_next' => null,
@@ -87,52 +90,82 @@ final class MediaMetadataWriterTest extends Unit
                 'cue_out' => null,
                 'fade_in' => null,
                 'fade_out' => null,
-            ]
+            ],
+            $media->toMetadata()->getExtraTags()
         );
 
-        $tags = $this->readTags();
+        $this->mediaRepo->writeToFile($media);
 
-        self::assertSame(['Test Title'], $tags['title'] ?? null);
+        $tags = $this->readId3v2Tags($media);
+
+        self::assertSame([self::TEST_TITLE], $tags['title'] ?? null);
+        self::assertSame([self::TEST_ARTIST], $tags['artist'] ?? null);
+        self::assertSame([self::TEST_ALBUM], $tags['album'] ?? null);
         self::assertArrayNotHasKey('text', $tags);
     }
 
-    /**
-     * @param array<value-of<MetadataTags>, mixed> $knownTags
-     * @param array<string, mixed> $extraTags
-     */
-    private function write(array $knownTags, array $extraTags): void
+    public function testExtraMetadataIsWrittenAsTxxxFramesAndReadBack(): void
     {
-        $metadata = new Metadata();
-        $metadata->setKnownTags($knownTags);
-        $metadata->setExtraTags($extraTags);
+        $media = $this->generateMedia();
+        $media->extra_metadata = [
+            'cue_in' => 1.5,
+            'fade_out' => 2.5,
+        ];
 
-        ($this->writer)(new WriteMetadata($metadata, $this->path));
+        $this->mediaRepo->writeToFile($media);
+
+        $tags = $this->readId3v2Tags($media);
+
+        self::assertSame([self::TEST_TITLE], $tags['title'] ?? null);
+        self::assertSame(
+            [
+                'cue_in' => '1.5',
+                'fade_out' => '2.5',
+            ],
+            $tags['text'] ?? null
+        );
+
+        $metadata = $this->metadataManager->read($this->getLocalPath($media));
+
+        self::assertSame(self::TEST_TITLE, $metadata->getKnownTags()['title'] ?? null);
+        self::assertSame('1.5', $metadata->getExtraTags()['cue_in'] ?? null);
+        self::assertSame('2.5', $metadata->getExtraTags()['fade_out'] ?? null);
+    }
+
+    private function generateMedia(): StationMedia
+    {
+        $media = $this->dummyMediaGenerator->generate(
+            $this->storageLocation,
+            new MediaEntry(
+                ref: 'media',
+                path: 'metadata-writer-test.mp3',
+                uniqueId: '',
+                length: 3.0,
+                artist: self::TEST_ARTIST,
+                title: self::TEST_TITLE,
+                album: self::TEST_ALBUM,
+                genre: null
+            )
+        );
+
+        self::assertInstanceOf(StationMedia::class, $media);
+        $this->generatedMedia[] = $media;
+
+        return $media;
+    }
+
+    private function getLocalPath(StationMedia $media): string
+    {
+        return $this->storagePath . '/' . $media->path;
     }
 
     /**
      * @return array<string, mixed>
      */
-    private function readTags(): array
+    private function readId3v2Tags(StationMedia $media): array
     {
-        $info = (new GetID3())->analyze($this->path);
+        $info = (new GetID3())->analyze($this->getLocalPath($media));
 
-        return $info['tags']['id3v2'] ?? [];
-    }
-
-    /**
-     * A handful of silent MPEG-1 Layer III frames, enough for GetID3 to recognise the file as
-     * an MP3 and to allow ID3v2 tags to be written to it.
-     */
-    private static function buildSilentMp3(): string
-    {
-        // FF FB: sync word, MPEG-1, Layer III, no CRC.
-        // 90:    128 kbit/s, 44.1 kHz, no padding.
-        // 04:    stereo, original.
-        $frameHeader = "\xFF\xFB\x90\x04";
-
-        // floor(144 * 128000 / 44100) = 417 bytes per frame, header included.
-        $frame = $frameHeader . str_repeat("\x00", 413);
-
-        return str_repeat($frame, 100);
+        return Types::array($info['tags']['id3v2'] ?? []);
     }
 }
