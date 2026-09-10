@@ -285,17 +285,19 @@ final class StationMediaRepository extends Repository
             $metadata->setArtwork($fs->read($artPath));
         }
 
-        // Write tags to the Media file.
-        $media->mtime = time() + 5;
         $media->updateMetaFields();
 
-        return $fs->withLocalFile(
+        $written = $fs->withLocalFile(
             $media->path,
-            function ($path) use ($metadata) {
-                $this->metadataManager->write($metadata, $path);
-                return true;
-            }
-        );
+            fn(string $path): bool => $this->metadataManager->write($metadata, $path)
+        ) === true;
+
+        if ($written) {
+            // Keep record newer than file so tags are not read back over it
+            $media->mtime = time() + 5;
+        }
+
+        return $written;
     }
 
     public function updateWaveform(

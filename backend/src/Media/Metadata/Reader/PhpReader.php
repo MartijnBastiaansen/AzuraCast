@@ -58,9 +58,14 @@ final class PhpReader extends AbstractReader
                 ];
             }
 
-            $toProcess[] = $this->convertReplayGainBackIntoText($info['replay_gain'] ?? []);
-
             $this->aggregateMetaTags($metadata, $toProcess);
+
+            // getID3 pulls ReplayGain out of Vorbis comments, in ID3v2 and APE tags it is kept
+            $extraTags = $metadata->getExtraTags();
+            foreach ($this->convertReplayGainBackIntoText($info['replay_gain'] ?? []) as $key => $value) {
+                $extraTags[$key] ??= $value;
+            }
+            $metadata->setExtraTags($extraTags);
 
             $metadata->setMimeType($info['mime_type']);
 
@@ -100,26 +105,26 @@ final class PhpReader extends AbstractReader
         $return = [];
 
         if (isset($row['track']['peak'])) {
-            $return['replaygain_track_peak'] = $row['track']['peak'];
+            $return['replaygain_track_peak'] = (string) $row['track']['peak'];
         }
         if (isset($row['track']['originator'])) {
-            $return['replaygain_track_originator'] = $row['track']['originator'];
+            $return['replaygain_track_originator'] = (string) $row['track']['originator'];
         }
         if (isset($row['track']['adjustment'])) {
             $return['replaygain_track_gain'] = $row['track']['adjustment'] . ' dB';
         }
         if (isset($row['album']['peak'])) {
-            $return['replaygain_album_peak'] = $row['album']['peak'];
+            $return['replaygain_album_peak'] = (string) $row['album']['peak'];
         }
         if (isset($row['album']['originator'])) {
-            $return['replaygain_album_originator'] = $row['album']['originator'];
+            $return['replaygain_album_originator'] = (string) $row['album']['originator'];
         }
         if (isset($row['album']['adjustment'])) {
             $return['replaygain_album_gain'] = $row['album']['adjustment'] . ' dB';
         }
 
         if (isset($row['reference_volume'])) {
-            $return['replaygain_reference_loudness'] = $row['reference_volume'] . ' LUFS';
+            $return['replaygain_reference_loudness'] = $row['reference_volume'] . ' dB';
         }
 
         return $return;
