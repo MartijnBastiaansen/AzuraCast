@@ -7,6 +7,7 @@ namespace App\Media\Metadata\Reader;
 use App\Container\LoggerAwareTrait;
 use App\Event\Media\ReadMetadata;
 use App\Media\Metadata;
+use App\Media\Metadata\ReplayGainTags;
 use App\Utilities\Time;
 use JamesHeinrich\GetID3\GetID3;
 use RuntimeException;
@@ -58,7 +59,7 @@ final class PhpReader extends AbstractReader
                 ];
             }
 
-            $toProcess[] = $this->convertReplayGainBackIntoText($info['replay_gain'] ?? []);
+            $toProcess[] = ReplayGainTags::fromGetId3($info['replay_gain'] ?? []);
 
             $this->aggregateMetaTags($metadata, $toProcess);
 
@@ -93,35 +94,5 @@ final class PhpReader extends AbstractReader
                 ]
             );
         }
-    }
-
-    protected function convertReplayGainBackIntoText(array $row): array
-    {
-        $return = [];
-
-        if (isset($row['track']['peak'])) {
-            $return['replaygain_track_peak'] = $row['track']['peak'];
-        }
-        if (isset($row['track']['originator'])) {
-            $return['replaygain_track_originator'] = $row['track']['originator'];
-        }
-        if (isset($row['track']['adjustment'])) {
-            $return['replaygain_track_gain'] = $row['track']['adjustment'] . ' dB';
-        }
-        if (isset($row['album']['peak'])) {
-            $return['replaygain_album_peak'] = $row['album']['peak'];
-        }
-        if (isset($row['album']['originator'])) {
-            $return['replaygain_album_originator'] = $row['album']['originator'];
-        }
-        if (isset($row['album']['adjustment'])) {
-            $return['replaygain_album_gain'] = $row['album']['adjustment'] . ' dB';
-        }
-
-        if (isset($row['reference_volume'])) {
-            $return['replaygain_reference_loudness'] = $row['reference_volume'] . ' LUFS';
-        }
-
-        return $return;
     }
 }

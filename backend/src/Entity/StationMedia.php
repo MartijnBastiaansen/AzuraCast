@@ -201,7 +201,10 @@ final class StationMedia implements
         $metadata = new Metadata();
         $metadata->setDuration($this->length);
 
-        $tags = array_filter(
+        // These are the only file tags the media editor owns, and they are listed even when empty:
+        // the writer leaves every tag it is not given alone, and treats a null as "this record has
+        // no value for it any more, so remove it from the file".
+        $metadata->setKnownTags(
             [
                 'title' => $this->title,
                 'artist' => $this->artist,
@@ -211,8 +214,6 @@ final class StationMedia implements
                 'isrc' => $this->isrc,
             ]
         );
-
-        $metadata->setKnownTags($tags);
         $metadata->setExtraTags($this->extra_metadata->toArray() ?? []);
 
         return $metadata;
