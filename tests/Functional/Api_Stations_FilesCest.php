@@ -22,8 +22,13 @@ class Api_Stations_FilesCest extends CestAbstract
         $localPath = $station->media_storage_location->path . '/' . $media->path;
         $editUrl = '/api/station/' . $station->id . '/file/' . $media->id;
 
+        $mtimeBefore = $media->mtime = time() - 3600;
+        $this->em->persist($media);
+        $this->em->flush();
+
         $hashBefore = md5_file($localPath);
-        $mtimeBefore = $media->mtime;
+
+        $I->haveHttpHeader('Content-Type', 'application/json');
 
         $I->sendPut($editUrl, ['playlists' => []]);
         $I->seeResponseCodeIsSuccessful();
