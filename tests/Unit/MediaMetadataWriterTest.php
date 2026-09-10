@@ -266,8 +266,12 @@ final class MediaMetadataWriterTest extends Unit
             $pictures[0]['data'] ?? null
         );
 
+        $media->mtime = 0;
         $this->mediaRepo->removeAlbumArt($media);
         self::assertCount(0, $this->readPictures($media));
+
+        $this->em->refresh($media);
+        self::assertGreaterThan(0, $media->mtime);
 
         $vorbisTags = Types::array($this->analyze($media)['tags']['vorbiscomment'] ?? []);
         self::assertArrayNotHasKey('attached_picture', $vorbisTags);

@@ -266,10 +266,10 @@ final class StationMediaRepository extends Repository
         $fs->delete($currentAlbumArtPath);
 
         $media->art_updated_at = 0;
+        $this->writeToFile($media, $fs);
+
         $this->em->persist($media);
         $this->em->flush();
-
-        $this->writeToFile($media, $fs);
     }
 
     public function writeToFile(
