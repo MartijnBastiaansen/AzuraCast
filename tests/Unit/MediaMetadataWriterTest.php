@@ -28,6 +28,10 @@ final class MediaMetadataWriterTest extends Unit
         MetadataTags::Isrc->value => null,
     ];
 
+    /** The two text encodings an ID3v2.3 frame can declare. */
+    private const int ID3V2_ISO_8859_1 = 0;
+    private const int ID3V2_UTF_16 = 1;
+
     private const array NO_EXTRA_TAGS = [
         'amplify' => null,
         'cross_start_next' => null,
@@ -168,6 +172,36 @@ final class MediaMetadataWriterTest extends Unit
     }
 
     /**
+     * Taggers commonly write TXXX in UTF-16, and GetID3 reports such a frame's value as the raw
+     * bytes it held. Those go back into the file untouched: decoding and re-encoding them loses
+     * a value of exactly "0", which fails the truthiness check in GetID3's own converter and
+     * comes back undecoded.
+     */
+    public function testUtf16TxxxFramesAreWrittenBackByteForByte(): void
+    {
+        $this->seedUtf16TxxxFrames([
+            'BARCODE' => '050087307646',
+            'ITUNESADVISORY' => '0',
+            'MusicBrainz Album Id' => 'e4ca0f2c',
+        ]);
+
+        $before = $this->readTxxxFrames();
+
+        $this->write([MetadataTags::Title->value => 'New Title'], ['cue_in' => 1.5]);
+
+        $after = $this->readTxxxFrames();
+
+        foreach ($before as $description => $frame) {
+            self::assertSame($frame, $after[$description] ?? null, $description);
+        }
+
+        self::assertSame(
+            ['encodingid' => self::ID3V2_ISO_8859_1, 'data' => '1.5'],
+            $after['cue_in'] ?? null
+        );
+    }
+
+    /**
      * GetID3 splits "3/12" into a track number and a total while reading, and only the first half
      * has a frame to be written back to.
      */
@@ -206,6 +240,56 @@ final class MediaMetadataWriterTest extends Unit
         self::assertSame(['104,178'], $apeItems['mp3gain_minmax']['data'] ?? null);
         self::assertSame(['-4.475000 dB'], $apeItems['replaygain_track_gain']['data'] ?? null);
         self::assertSame(['New Title'], $this->readTags()['title'] ?? null);
+    }
+
+    /**
+     * Custom fields reach the writer as extra known tags, so a tag AzuraCast has no field of its
+     * own for still gets written and cleared.
+     */
+    public function testAutoAssignedCustomFieldTagsAreWrittenAndCleared(): void
+    {
+        $this->seedTags([
+            'COMPOSER' => ['Old Composer'],
+            'PUBLISHER' => ['Old Publisher'],
+            'BPM' => ['128'],
+        ]);
+
+        $this->write(
+            [
+                MetadataTags::Title->value => 'Test Title',
+                // As a filled and an emptied custom field arrive from writeToFile().
+                MetadataTags::Composer->value => 'New Composer',
+                MetadataTags::Publisher->value => null,
+            ],
+            []
+        );
+
+        $tags = $this->readTags();
+
+        self::assertSame(['New Composer'], $tags['composer'] ?? null);
+        self::assertArrayNotHasKey('publisher', $tags);
+        self::assertSame(['128'], $tags['bpm'] ?? null);
+    }
+
+    /**
+     * A custom field can have any metadata tag assigned to it, including ones GetID3 has no
+     * writable frame for. Such a tag has to be dropped, because GetID3 fails the entire ID3v2
+     * write over a single frame it cannot generate.
+     */
+    public function testTagsWithoutAWritableFrameDoNotFailTheWrite(): void
+    {
+        $this->write(
+            [
+                MetadataTags::Title->value => 'Test Title',
+                MetadataTags::MusicCdIdentifier->value => 'not a real MCDI payload',
+            ],
+            []
+        );
+
+        $tags = $this->readTags();
+
+        self::assertSame(['Test Title'], $tags['title'] ?? null);
+        self::assertArrayNotHasKey('music_cd_identifier', $tags);
     }
 
     /**
@@ -288,6 +372,42 @@ final class MediaMetadataWriterTest extends Unit
         if (!empty($tagWriter->errors)) {
             throw new RuntimeException(implode(', ', $tagWriter->errors));
         }
+    }
+
+    /**
+     * Write TXXX frames encoded the way an external tagger would: UTF-16, little endian, with a
+     * byte order mark on both the description and the value.
+     *
+     * @param array<string, string> $frames
+     */
+    private function seedUtf16TxxxFrames(array $frames): void
+    {
+        $tagData = [];
+        foreach ($frames as $description => $value) {
+            $tagData[] = [
+                'encodingid' => self::ID3V2_UTF_16,
+                'description' => "\xFF\xFE" . mb_convert_encoding($description, 'UTF-16LE', 'UTF-8'),
+                'data' => "\xFF\xFE" . mb_convert_encoding($value, 'UTF-16LE', 'UTF-8'),
+            ];
+        }
+
+        $this->seedTags(['TEXT' => $tagData]);
+    }
+
+    /**
+     * @return array<string, array{encodingid: mixed, data: string}>
+     */
+    private function readTxxxFrames(): array
+    {
+        $frames = [];
+        foreach ($this->readInfo()['id3v2']['TXXX'] ?? [] as $frame) {
+            $frames[(string)($frame['description'] ?? '')] = [
+                'encodingid' => $frame['encodingid'] ?? null,
+                'data' => (string)($frame['data'] ?? ''),
+            ];
+        }
+
+        return $frames;
     }
 
     /**

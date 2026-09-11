@@ -14,6 +14,7 @@ use App\Entity\StorageLocation;
 use App\Exception\NotFoundException;
 use App\Flysystem\ExtendedFilesystemInterface;
 use App\Media\AlbumArt;
+use App\Media\Enums\MetadataTags;
 use App\Media\MetadataManager;
 use App\Media\RemoteAlbumArt;
 use App\Service\AudioWaveform;
@@ -279,6 +280,9 @@ final class StationMediaRepository extends Repository
         $fs ??= $this->getFilesystem($media);
 
         $metadata = $media->toMetadata();
+        $metadata->setKnownTags(
+            $metadata->getKnownTags() + $this->getAutoAssignedTags($media)
+        );
 
         $artPath = StationMedia::getArtPath($media->unique_id);
         if ($fs->fileExists($artPath)) {
@@ -296,6 +300,44 @@ final class StationMediaRepository extends Repository
                 return true;
             }
         );
+    }
+
+    /**
+     * The counterpart to the auto-assignment loadFromFile() does: a custom field with a tag
+     * assigned to it is a field the media editor owns, so its value belongs in the file as well.
+     *
+     * Every assignable tag is listed, with a null for the ones this record has no value for, so
+     * that clearing a custom field removes its tag from the file instead of leaving the old value
+     * behind. Where a tag is also one of the fields StationMedia writes itself, that one wins.
+     *
+     * @return array<value-of<MetadataTags>, string|null>
+     */
+    private function getAutoAssignedTags(StationMedia $media): array
+    {
+        // The column is free-form text; a value that is not a tag AzuraCast knows has nothing in
+        // the file to be written to.
+        $assignableTags = array_filter(
+            array_map(
+                static fn(mixed $autoAssign) => MetadataTags::tryFrom((string)$autoAssign),
+                array_keys($this->customFieldRepo->getAutoAssignableFields())
+            )
+        );
+
+        $autoAssignedTags = array_fill_keys(
+            array_map(static fn(MetadataTags $tag) => $tag->value, $assignableTags),
+            null
+        );
+
+        foreach ($media->custom_fields as $mediaCustomField) {
+            /** @var StationMediaCustomField $mediaCustomField */
+            $tag = MetadataTags::tryFrom((string)$mediaCustomField->field->auto_assign);
+
+            if (null !== $tag && array_key_exists($tag->value, $autoAssignedTags)) {
+                $autoAssignedTags[$tag->value] = $mediaCustomField->value;
+            }
+        }
+
+        return $autoAssignedTags;
     }
 
     public function updateWaveform(
