@@ -14,6 +14,7 @@ use App\Entity\StorageLocation;
 use App\Exception\NotFoundException;
 use App\Flysystem\ExtendedFilesystemInterface;
 use App\Media\AlbumArt;
+use App\Media\MetadataInterface;
 use App\Media\MetadataManager;
 use App\Media\RemoteAlbumArt;
 use App\Service\AudioWaveform;
@@ -247,13 +248,13 @@ final class StationMediaRepository extends Repository
     ): void {
         $fs ??= $this->getFilesystem($media);
 
-        $media->art_updated_at = time();
-        $this->em->persist($media);
-
         $albumArtPath = StationMedia::getArtPath($media->unique_id);
         $albumArtString = AlbumArt::resize($rawArtString);
 
         $fs->write($albumArtPath, $albumArtString);
+
+        $media->art_updated_at = time();
+        $this->em->persist($media);
     }
 
     public function removeAlbumArt(
@@ -266,7 +267,10 @@ final class StationMediaRepository extends Repository
         $fs->delete($currentAlbumArtPath);
 
         $media->art_updated_at = 0;
-        $this->writeToFile($media, $fs);
+
+        $metadata = $media->toMetadata();
+        $metadata->removeArtwork();
+        $this->writeMetadata($media, $metadata, $fs);
 
         $this->em->persist($media);
         $this->em->flush();
@@ -285,6 +289,14 @@ final class StationMediaRepository extends Repository
             $metadata->setArtwork($fs->read($artPath));
         }
 
+        return $this->writeMetadata($media, $metadata, $fs);
+    }
+
+    private function writeMetadata(
+        StationMedia $media,
+        MetadataInterface $metadata,
+        ExtendedFilesystemInterface $fs
+    ): bool {
         $media->updateMetaFields();
 
         $written = $fs->withLocalFile(

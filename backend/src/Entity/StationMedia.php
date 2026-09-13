@@ -8,6 +8,7 @@ use App\Entity\Interfaces\IdentifiableEntityInterface;
 use App\Entity\Interfaces\PathAwareInterface;
 use App\Entity\Interfaces\SongInterface;
 use App\Flysystem\StationFilesystems;
+use App\Media\Enums\MetadataTags;
 use App\Media\Metadata;
 use App\Media\MetadataInterface;
 use App\Utilities\Types;
@@ -201,6 +202,7 @@ final class StationMedia implements
         $metadata = new Metadata();
         $metadata->setDuration($this->length);
 
+        /** @var array<value-of<MetadataTags>, mixed> $tags */
         $tags = array_filter(
             [
                 'title' => $this->title,
@@ -211,6 +213,24 @@ final class StationMedia implements
                 'isrc' => $this->isrc,
             ]
         );
+
+        foreach ($this->custom_fields as $customField) {
+            $autoAssign = $customField->field->auto_assign;
+            $value = $customField->value;
+
+            if (
+                $autoAssign === null
+                || $value === null
+                || trim($value) === ''
+            ) {
+                continue;
+            }
+
+            $tagEnum = MetadataTags::getTag($autoAssign);
+            if ($tagEnum !== null) {
+                $tags[$tagEnum->value] ??= $value;
+            }
+        }
 
         $metadata->setKnownTags($tags);
         $metadata->setExtraTags($this->extra_metadata->toArray() ?? []);

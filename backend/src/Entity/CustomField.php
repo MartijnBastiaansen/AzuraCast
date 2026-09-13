@@ -56,7 +56,7 @@ final class CustomField implements Stringable, IdentifiableEntityInterface
 
     #[
         OA\Property(
-            description: "An ID3v2 field to automatically assign to this value, if it exists in the media file."
+            description: "The media file tag this field is read from on import and written back to when the media is saved."
         ),
         ORM\Column(length: 100, nullable: true)
     ]

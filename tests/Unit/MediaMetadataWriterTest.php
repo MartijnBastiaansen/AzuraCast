@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Unit;
 
+use App\Entity\CustomField;
 use App\Entity\Enums\StorageLocationAdapters;
 use App\Entity\Enums\StorageLocationTypes;
 use App\Entity\Repository\StationMediaRepository;
 use App\Entity\StationMedia;
+use App\Entity\StationMediaCustomField;
 use App\Entity\StorageLocation;
 use App\Media\MetadataInterface;
 use App\Media\MetadataManager;
@@ -51,6 +53,12 @@ final class MediaMetadataWriterTest extends Unit
     private const string MP3GAIN_MINMAX = '104,178';
     private const string MP3GAIN_TRACK_GAIN = '-4.475000 dB';
     private const string DESCRIPTIONLESS_TXXX = 'no description';
+    private const string ITUNES_ADVISORY_TAG = 'ITUNESADVISORY';
+    private const string FOREIGN_URL = 'https://example.com/artist';
+    private const string ASCII_PUBLISHER = 'ASCII Records';
+    private const string FOREIGN_COMPOSER = 'Seeded Composer';
+    private const string CUSTOM_COMPOSER = 'Custom Composer';
+    private const string CUSTOM_ALBUM_ARTIST = 'Custom Album Artist';
 
     private EntityManagerInterface $em;
     private DummyMediaGenerator $dummyMediaGenerator;
@@ -64,6 +72,9 @@ final class MediaMetadataWriterTest extends Unit
 
     /** @var StationMedia[] */
     private array $generatedMedia = [];
+
+    /** @var CustomField[] */
+    private array $customFields = [];
 
     protected function _inject(Module $testsModule): void
     {
@@ -98,6 +109,11 @@ final class MediaMetadataWriterTest extends Unit
             $this->em->remove($media);
         }
         $this->generatedMedia = [];
+
+        foreach ($this->customFields as $customField) {
+            $this->em->remove($customField);
+        }
+        $this->customFields = [];
 
         $this->em->remove($this->storageLocation);
         $this->em->flush();
@@ -436,6 +452,174 @@ final class MediaMetadataWriterTest extends Unit
         self::assertSame(self::FOREIGN_ARTISTS, $text[self::FOREIGN_ARTISTS_TAG] ?? null);
     }
 
+    public function testUtf16TxxxFrameWithFalsyValueSurvivesSave(): void
+    {
+        $media = $this->generateMedia();
+        // iTunes stores TXXX frames as UTF-16 with BOM even for ASCII, which ffmpeg never does
+        $utf16Description = "\xFF\xFE" . mb_convert_encoding(self::ITUNES_ADVISORY_TAG, 'UTF-16LE', 'UTF-8');
+        $this->seedTagsWithGetId3(
+            $media,
+            [
+                'text' => [
+                    [
+                        'encodingid' => 1,
+                        'description' => $utf16Description,
+                        'data' => "\xFF\xFE0\x00",
+                    ],
+                ],
+            ],
+            ['id3v2.3']
+        );
+
+        $frame = $this->readTxxxFrames($media)[self::ITUNES_ADVISORY_TAG] ?? [];
+        self::assertSame(1, $frame['encodingid'] ?? null);
+        self::assertSame("\xFF\xFE0\x00", $frame['data'] ?? null);
+
+        $media->extra_metadata = ['cue_in' => 1.5];
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $frame = $this->readTxxxFrames($media)[self::ITUNES_ADVISORY_TAG] ?? [];
+        self::assertSame(0, $frame['encodingid'] ?? null);
+        self::assertSame('0', $frame['data'] ?? null);
+    }
+
+    public function testUrlFrameAndAsciiTextFramesKeepLatin1Encoding(): void
+    {
+        $media = $this->generateMedia();
+        $this->seedTagsWithGetId3(
+            $media,
+            [
+                'url_artist' => [self::FOREIGN_URL],
+                'publisher' => [self::ASCII_PUBLISHER],
+            ],
+            ['id3v2.3']
+        );
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $tags = $this->readFileTags($media);
+
+        self::assertSame([self::FOREIGN_URL], $tags['url_artist'] ?? null);
+        self::assertSame([self::ASCII_PUBLISHER], $tags['publisher'] ?? null);
+
+        $publisherFrame = Types::array(Types::array($this->analyze($media)['id3v2']['TPUB'] ?? [])[0] ?? []);
+        self::assertSame(0, $publisherFrame['encodingid'] ?? null);
+    }
+
+    #[DataProvider('replaceablePictureFormatProvider')]
+    public function testEmbeddedPictureIsKeptWhenCachedArtIsMissing(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+
+        $this->mediaRepo->writeAlbumArt($media, $this->createCoverImage('red'));
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $pictureData = $this->readPictures($media)[0]['data'] ?? null;
+        self::assertNotNull($pictureData);
+
+        unlink($this->getLocalPath(StationMedia::getArtPath($media->unique_id)));
+
+        $media->title = 'Changed Title';
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $pictures = $this->readPictures($media);
+        self::assertCount(1, $pictures);
+        self::assertSame($pictureData, $pictures[0]['data'] ?? null);
+
+        $this->mediaRepo->removeAlbumArt($media);
+        self::assertCount(0, $this->readPictures($media));
+    }
+
+    public function testForeignEmbeddedPictureSurvivesSaveWithoutCachedArt(): void
+    {
+        $media = $this->generateMedia();
+        $this->embedCoverWithFfmpeg($media, $this->createCoverImageFile('red'));
+
+        $pictures = $this->readPictures($media);
+        self::assertCount(1, $pictures);
+
+        $media->extra_metadata = ['cue_in' => 1.5];
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $picturesAfter = $this->readPictures($media);
+        self::assertCount(1, $picturesAfter);
+        self::assertSame($pictures[0]['data'] ?? null, $picturesAfter[0]['data'] ?? null);
+        self::assertSame($pictures[0]['picturetypeid'] ?? null, $picturesAfter[0]['picturetypeid'] ?? null);
+    }
+
+    #[DataProvider('formatProvider')]
+    public function testCustomFieldWithNativeTagIsWritten(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+        $this->addCustomField($media, 'composer', self::CUSTOM_COMPOSER);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        self::assertSame([self::CUSTOM_COMPOSER], $this->readFileTags($media)['composer'] ?? null);
+    }
+
+    #[DataProvider('formatProvider')]
+    public function testCustomFieldWithoutId3v2FrameIsWrittenAsTxxx(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+        $this->addCustomField($media, 'album_artist', self::CUSTOM_ALBUM_ARTIST);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $tags = $this->readFileTags($media);
+        $fileValue = $extension === 'mp3'
+            ? Types::array($tags['text'] ?? [])['album_artist'] ?? null
+            : Types::array($tags['album_artist'] ?? [])[0] ?? null;
+
+        self::assertSame(self::CUSTOM_ALBUM_ARTIST, $fileValue);
+        self::assertSame(
+            self::CUSTOM_ALBUM_ARTIST,
+            $this->readMetadata($media)->getKnownTags()['album_artist'] ?? null
+        );
+    }
+
+    public function testEmptyCustomFieldLeavesExistingTagUntouched(): void
+    {
+        $media = $this->generateMedia();
+        $this->tagFile($media, ['composer' => self::FOREIGN_COMPOSER]);
+        $this->addCustomField($media, 'composer', '');
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        self::assertSame([self::FOREIGN_COMPOSER], $this->readFileTags($media)['composer'] ?? null);
+    }
+
+    public function testEntityFieldWinsOverCustomFieldWithSameTag(): void
+    {
+        $media = $this->generateMedia();
+        $this->addCustomField($media, 'title', 'Custom Title');
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        self::assertSame([self::TEST_TITLE], $this->readFileTags($media)['title'] ?? null);
+    }
+
+    public function testCustomFieldTagIsReadBackByLoadFromFile(): void
+    {
+        $media = $this->generateMedia();
+        $composerField = $this->addCustomField($media, 'composer', self::CUSTOM_COMPOSER);
+        $albumArtistField = $this->addCustomField($media, 'album_artist', self::CUSTOM_ALBUM_ARTIST);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $this->mediaRepo->loadFromFile($media, $this->getLocalPath($media->path));
+        $this->em->flush();
+
+        $values = [];
+        foreach ($media->custom_fields as $customFieldRow) {
+            $values[$customFieldRow->field->short_name] = $customFieldRow->value;
+        }
+
+        self::assertSame(self::CUSTOM_COMPOSER, $values[$composerField->short_name] ?? null);
+        self::assertSame(self::CUSTOM_ALBUM_ARTIST, $values[$albumArtistField->short_name] ?? null);
+    }
+
     private function generateMedia(string $extension = 'mp3'): StationMedia
     {
         $media = $this->dummyMediaGenerator->generate(
@@ -520,7 +704,7 @@ final class MediaMetadataWriterTest extends Unit
         $tagWriter->tag_data = $tagData;
         $tagWriter->overwrite_tags = true;
         $tagWriter->remove_other_tags = false;
-        $tagWriter->tag_encoding = 'UTF8';
+        $tagWriter->tag_encoding = 'UTF-8';
         $tagWriter->WriteTags();
 
         if (!empty($tagWriter->errors)) {
@@ -528,7 +712,30 @@ final class MediaMetadataWriterTest extends Unit
         }
     }
 
+    private function addCustomField(StationMedia $media, string $autoAssign, ?string $value): CustomField
+    {
+        $customField = new CustomField();
+        $customField->name = 'Test ' . $autoAssign;
+        $customField->auto_assign = $autoAssign;
+        $this->em->persist($customField);
+        $this->customFields[] = $customField;
+
+        $customFieldRow = new StationMediaCustomField($media, $customField);
+        $customFieldRow->value = $value;
+        $this->em->persist($customFieldRow);
+        $media->custom_fields->add($customFieldRow);
+
+        $this->em->flush();
+
+        return $customField;
+    }
+
     private function createCoverImage(string $color): string
+    {
+        return (string) file_get_contents($this->createCoverImageFile($color));
+    }
+
+    private function createCoverImageFile(string $color): string
     {
         $coverPath = $this->storagePath . '/cover-' . $color . '.jpg';
 
@@ -543,7 +750,55 @@ final class MediaMetadataWriterTest extends Unit
             $coverPath,
         ]);
 
-        return (string) file_get_contents($coverPath);
+        return $coverPath;
+    }
+
+    /**
+     * Embeds a cover the way an external tagger would, without touching AzuraCast's album art cache.
+     */
+    private function embedCoverWithFfmpeg(StationMedia $media, string $coverPath): void
+    {
+        $path = $this->getLocalPath($media->path);
+        $taggedPath = $this->storagePath . '/with-cover.' . pathinfo($path, PATHINFO_EXTENSION);
+
+        $this->ffmpeg->getFFMpegDriver()->command([
+            '-y',
+            '-i',
+            $path,
+            '-i',
+            $coverPath,
+            '-map',
+            '0:a',
+            '-map',
+            '1:v',
+            '-c',
+            'copy',
+            '-id3v2_version',
+            '3',
+            '-disposition:v',
+            'attached_pic',
+            '-metadata:s:v',
+            'title=Album cover',
+            '-metadata:s:v',
+            'comment=Cover (front)',
+            $taggedPath,
+        ]);
+
+        rename($taggedPath, $path);
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function readTxxxFrames(StationMedia $media): array
+    {
+        $frames = [];
+        foreach (Types::array($this->analyze($media)['id3v2']['TXXX'] ?? []) as $frame) {
+            $frame = Types::array($frame);
+            $frames[Types::string($frame['description'] ?? null)] = $frame;
+        }
+
+        return $frames;
     }
 
     private function getLocalPath(string $path): string

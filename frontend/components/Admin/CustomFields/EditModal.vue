@@ -34,9 +34,9 @@
                 id="edit_form_auto_assign"
                 class="col-md-6"
                 :field="r$.auto_assign"
-                :label="$gettext('Automatically Set from ID3v2 Value')"
+                :label="$gettext('Linked Media File Tag')"
                 :options="autoAssignOptions"
-                :description="$gettext('Optionally select an ID3v2 metadata field that, if present, will be used to set this field\'s value.')"
+                :description="$gettext('Optionally link this field to a tag in the media file. The field is filled from that tag when the file is imported and its value is written back to the tag when the file is saved.')"
             />
         </div>
     </modal-form>
