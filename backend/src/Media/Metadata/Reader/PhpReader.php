@@ -6,8 +6,11 @@ namespace App\Media\Metadata\Reader;
 
 use App\Container\LoggerAwareTrait;
 use App\Event\Media\ReadMetadata;
+use App\Media\Enums\MetadataTags;
 use App\Media\Metadata;
+use App\Media\Metadata\Id3v2Text;
 use App\Utilities\Time;
+use App\Utilities\Types;
 use JamesHeinrich\GetID3\GetID3;
 use RuntimeException;
 use Throwable;
@@ -60,11 +63,37 @@ final class PhpReader extends AbstractReader
 
             $this->aggregateMetaTags($metadata, $toProcess);
 
-            // getID3 pulls ReplayGain out of Vorbis comments, in ID3v2 and APE tags it is kept
+            $knownTags = $metadata->getKnownTags();
             $extraTags = $metadata->getExtraTags();
+
+            // getID3 skips TXXX frames whose text is "0" when building $info['tags']
+            foreach (Types::array($info['id3v2']['TXXX'] ?? []) as $frame) {
+                $frame = Types::array($frame);
+
+                $description = mb_strtolower(trim(Types::string($frame['description'] ?? null)));
+                $value = Id3v2Text::decode(
+                    Types::string($frame['encoding'] ?? null, 'ISO-8859-1'),
+                    Types::string($frame['data'] ?? null)
+                );
+
+                if ($description === '' || $value === '') {
+                    continue;
+                }
+
+                $tagEnum = MetadataTags::getTag($description);
+                if ($tagEnum !== null) {
+                    $knownTags[$tagEnum->value] ??= $value;
+                } else {
+                    $extraTags[$description] ??= $value;
+                }
+            }
+
+            // getID3 pulls ReplayGain out of Vorbis comments, in ID3v2 and APE tags it is kept
             foreach ($this->convertReplayGainBackIntoText($info['replay_gain'] ?? []) as $key => $value) {
                 $extraTags[$key] ??= $value;
             }
+
+            $metadata->setKnownTags($knownTags);
             $metadata->setExtraTags($extraTags);
 
             $metadata->setMimeType($info['mime_type']);

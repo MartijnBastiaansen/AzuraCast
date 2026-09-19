@@ -26,6 +26,8 @@ use JamesHeinrich\GetID3\WriteTags;
 use RuntimeException;
 use Symfony\Component\Filesystem\Filesystem;
 
+use const ARRAY_FILTER_USE_KEY;
+
 /**
  * Tests the "save media" path (StationMedia::toMetadata() -> MetadataManager -> Metadata\Writer)
  * against real files rendered by the DummyMediaGenerator to verify our metadata writing works.
@@ -59,6 +61,9 @@ final class MediaMetadataWriterTest extends Unit
     private const string FOREIGN_COMPOSER = 'Seeded Composer';
     private const string CUSTOM_COMPOSER = 'Custom Composer';
     private const string CUSTOM_ALBUM_ARTIST = 'Custom Album Artist';
+    private const string CUSTOM_TAG = 'Likes';
+    private const string CUSTOM_TAG_VALUE = '42';
+    private const string CUSTOM_MUSICBRAINZ_ALBUM_ID = '9a8b7c6d-1111-2222-3333-444455556666';
 
     private EntityManagerInterface $em;
     private DummyMediaGenerator $dummyMediaGenerator;
@@ -611,13 +616,118 @@ final class MediaMetadataWriterTest extends Unit
         $this->mediaRepo->loadFromFile($media, $this->getLocalPath($media->path));
         $this->em->flush();
 
-        $values = [];
-        foreach ($media->custom_fields as $customFieldRow) {
-            $values[$customFieldRow->field->short_name] = $customFieldRow->value;
-        }
+        $values = $this->readCustomFieldValues($media);
 
         self::assertSame(self::CUSTOM_COMPOSER, $values[$composerField->short_name] ?? null);
         self::assertSame(self::CUSTOM_ALBUM_ARTIST, $values[$albumArtistField->short_name] ?? null);
+    }
+
+    #[DataProvider('formatProvider')]
+    public function testCustomFieldWithUnknownTagIsWritten(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+        $this->addCustomField($media, self::CUSTOM_TAG, self::CUSTOM_TAG_VALUE);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $tags = $this->readFileTags($media);
+
+        if ($extension === 'mp3') {
+            // The TXXX description keeps the exact spelling the admin entered
+            self::assertSame(self::CUSTOM_TAG_VALUE, Types::array($tags['text'] ?? [])[self::CUSTOM_TAG] ?? null);
+        } else {
+            // Vorbis comment keys are case-insensitive and getID3 reports them lowercased
+            self::assertSame([self::CUSTOM_TAG_VALUE], $tags[strtolower(self::CUSTOM_TAG)] ?? null);
+        }
+    }
+
+    #[DataProvider('formatProvider')]
+    public function testUnknownCustomFieldTagIsReadBackByLoadFromFile(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+        $customField = $this->addCustomField($media, self::CUSTOM_TAG, self::CUSTOM_TAG_VALUE);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $this->mediaRepo->loadFromFile($media, $this->getLocalPath($media->path));
+        $this->em->flush();
+
+        self::assertSame(
+            self::CUSTOM_TAG_VALUE,
+            $this->readCustomFieldValues($media)[$customField->short_name] ?? null
+        );
+    }
+
+    #[DataProvider('formatProvider')]
+    public function testZeroValueOfLinkedCustomFieldIsImported(string $extension): void
+    {
+        $media = $this->generateMedia($extension);
+        $customField = $this->addCustomField($media, self::CUSTOM_TAG, '0');
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $this->mediaRepo->loadFromFile($media, $this->getLocalPath($media->path));
+        $this->em->flush();
+
+        self::assertSame('0', $this->readCustomFieldValues($media)[$customField->short_name] ?? null);
+    }
+
+    public function testCustomFieldReplacesForeignTxxxWithDifferentCase(): void
+    {
+        $media = $this->generateMedia();
+        $this->tagFile($media, [self::MUSICBRAINZ_ALBUM_ID_TAG => self::MUSICBRAINZ_ALBUM_ID]);
+        $this->addCustomField(
+            $media,
+            strtoupper(self::MUSICBRAINZ_ALBUM_ID_TAG),
+            self::CUSTOM_MUSICBRAINZ_ALBUM_ID
+        );
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        $expectedDescription = strtolower(self::MUSICBRAINZ_ALBUM_ID_TAG);
+        $matchingFrames = array_filter(
+            $this->readTxxxFrames($media),
+            static fn(int|string $description): bool => strtolower((string) $description) === $expectedDescription,
+            ARRAY_FILTER_USE_KEY
+        );
+
+        self::assertCount(1, $matchingFrames);
+        self::assertSame(
+            self::CUSTOM_MUSICBRAINZ_ALBUM_ID,
+            $this->readMetadata($media)->getExtraTags()[$expectedDescription] ?? null
+        );
+    }
+
+    public function testCustomFieldWithKnownTagInNonCanonicalCaseIsImported(): void
+    {
+        $media = $this->generateMedia();
+        $customField = $this->addCustomField($media, 'Composer', self::CUSTOM_COMPOSER);
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        self::assertSame([self::CUSTOM_COMPOSER], $this->readFileTags($media)['composer'] ?? null);
+
+        $this->mediaRepo->loadFromFile($media, $this->getLocalPath($media->path));
+        $this->em->flush();
+
+        self::assertSame(
+            self::CUSTOM_COMPOSER,
+            $this->readCustomFieldValues($media)[$customField->short_name] ?? null
+        );
+    }
+
+    public function testEmptyUnknownCustomFieldLeavesExistingTagUntouched(): void
+    {
+        $media = $this->generateMedia();
+        $this->tagFile($media, [self::MUSICBRAINZ_ALBUM_ID_TAG => self::MUSICBRAINZ_ALBUM_ID]);
+        $this->addCustomField($media, self::MUSICBRAINZ_ALBUM_ID_TAG, '');
+
+        self::assertTrue($this->mediaRepo->writeToFile($media));
+
+        self::assertSame(
+            self::MUSICBRAINZ_ALBUM_ID,
+            Types::array($this->readFileTags($media)['text'] ?? [])[self::MUSICBRAINZ_ALBUM_ID_TAG] ?? null
+        );
     }
 
     private function generateMedia(string $extension = 'mp3'): StationMedia
@@ -710,6 +820,19 @@ final class MediaMetadataWriterTest extends Unit
         if (!empty($tagWriter->errors)) {
             throw new RuntimeException(implode(', ', $tagWriter->errors));
         }
+    }
+
+    /**
+     * @return array<string, ?string>
+     */
+    private function readCustomFieldValues(StationMedia $media): array
+    {
+        $values = [];
+        foreach ($media->custom_fields as $customFieldRow) {
+            $values[$customFieldRow->field->short_name] = $customFieldRow->value;
+        }
+
+        return $values;
     }
 
     private function addCustomField(StationMedia $media, string $autoAssign, ?string $value): CustomField

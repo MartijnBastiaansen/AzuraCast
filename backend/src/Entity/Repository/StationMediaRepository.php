@@ -14,6 +14,7 @@ use App\Entity\StorageLocation;
 use App\Exception\NotFoundException;
 use App\Flysystem\ExtendedFilesystemInterface;
 use App\Media\AlbumArt;
+use App\Media\Enums\MetadataTags;
 use App\Media\MetadataInterface;
 use App\Media\MetadataManager;
 use App\Media\RemoteAlbumArt;
@@ -181,17 +182,27 @@ final class StationMediaRepository extends Repository
             }
         }
 
-        $customFieldsToSet = $this->customFieldRepo->getAutoAssignableFields();
-        $tags = $metadata->getKnownTags();
-        foreach ($customFieldsToSet as $tag => $customFieldKey) {
-            if (!empty($tags[$tag])) {
-                $customFieldRow = new StationMediaCustomField($media, $customFieldKey);
-                $customFieldRow->value = $tags[$tag];
+        $knownTags = $metadata->getKnownTags();
+        $extraTags = $metadata->getExtraTags();
 
-                $this->em->persist($customFieldRow);
+        foreach ($this->customFieldRepo->getAutoAssignableFields() as $autoAssign => $customField) {
+            $autoAssign = (string) $autoAssign;
+            $tagEnum = MetadataTags::getTag($autoAssign);
 
-                $fieldCollection->add($customFieldRow);
+            $value = $tagEnum !== null
+                ? ($knownTags[$tagEnum->value] ?? null)
+                : ($extraTags[mb_strtolower($autoAssign)] ?? null);
+
+            if ($value === null || $value === '') {
+                continue;
             }
+
+            $customFieldRow = new StationMediaCustomField($media, $customField);
+            $customFieldRow->value = $value;
+
+            $this->em->persist($customFieldRow);
+
+            $fieldCollection->add($customFieldRow);
         }
 
         $artwork = $metadata->getArtwork();

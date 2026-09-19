@@ -214,6 +214,10 @@ final class StationMedia implements
             ]
         );
 
+        /** @var array<string, mixed> $extraTags */
+        $extraTags = [];
+        $seenExtraKeys = [];
+
         foreach ($this->custom_fields as $customField) {
             $autoAssign = $customField->field->auto_assign;
             $value = $customField->value;
@@ -229,11 +233,26 @@ final class StationMedia implements
             $tagEnum = MetadataTags::getTag($autoAssign);
             if ($tagEnum !== null) {
                 $tags[$tagEnum->value] ??= $value;
+                continue;
             }
+
+            $lowerKey = mb_strtolower($autoAssign);
+            if (isset($seenExtraKeys[$lowerKey])) {
+                continue;
+            }
+
+            $seenExtraKeys[$lowerKey] = true;
+            $extraTags[$autoAssign] = $value;
         }
 
+        // Sorted so reorders of custom fields don't look like metadata changed
+        ksort($tags);
+
+        $extraTags = array_replace($extraTags, $this->extra_metadata->toArray() ?? []);
+        ksort($extraTags);
+
         $metadata->setKnownTags($tags);
-        $metadata->setExtraTags($this->extra_metadata->toArray() ?? []);
+        $metadata->setExtraTags($extraTags);
 
         return $metadata;
     }

@@ -56,12 +56,28 @@ class Api_Stations_FilesCest extends CestAbstract
     {
         $I->wantTo('Rewrite the media file when a custom field linked to a file tag changes.');
 
+        $this->assertCustomFieldEditRewritesTheFile($I, 'composer');
+    }
+
+    /**
+     * @before setupComplete
+     * @before login
+     */
+    public function editCustomFieldWithCustomTagRewritesTheFile(FunctionalTester $I): void
+    {
+        $I->wantTo('Rewrite the media file when a custom field linked to a custom tag name changes.');
+
+        $this->assertCustomFieldEditRewritesTheFile($I, 'Likes');
+    }
+
+    private function assertCustomFieldEditRewritesTheFile(FunctionalTester $I, string $autoAssign): void
+    {
         $station = $this->getTestStation();
         $media = $this->uploadTestSong();
 
         $customField = new CustomField();
-        $customField->name = 'Composer';
-        $customField->auto_assign = 'composer';
+        $customField->name = "Linked {$autoAssign}";
+        $customField->auto_assign = $autoAssign;
         $this->em->persist($customField);
 
         $localPath = $station->media_storage_location->path . '/' . $media->path;
@@ -75,7 +91,7 @@ class Api_Stations_FilesCest extends CestAbstract
 
         $I->haveHttpHeader('Content-Type', 'application/json');
 
-        $I->sendPut($editUrl, ['custom_fields' => [$customField->short_name => 'Custom Composer']]);
+        $I->sendPut($editUrl, ['custom_fields' => [$customField->short_name => 'Custom Value']]);
         $I->seeResponseCodeIsSuccessful();
 
         $media = $this->em->refetch($media);

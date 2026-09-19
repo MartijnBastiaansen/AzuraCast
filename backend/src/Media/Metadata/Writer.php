@@ -210,10 +210,13 @@ final class Writer
      */
     private function buildTxxxRows(MetadataInterface $metadata, array $info, array $knownTagsAsTxxx): array
     {
-        $managedDescriptions = [
-            ...array_keys($metadata->getExtraTags()),
-            ...array_keys($knownTagsAsTxxx),
-        ];
+        $managedDescriptions = array_map(
+            static fn(int|string $key): string => strtolower((string) $key),
+            [
+                ...array_keys($metadata->getExtraTags()),
+                ...array_keys($knownTagsAsTxxx),
+            ]
+        );
 
         /** @var array<string, string> $values */
         $values = [];
@@ -229,14 +232,14 @@ final class Writer
                 continue;
             }
 
-            $values[$description] = self::decodeFrameText(
+            $values[$description] = Id3v2Text::decode(
                 Types::string($frame['encoding'] ?? null, 'ISO-8859-1'),
                 Types::string($frame['data'] ?? null)
             );
         }
 
-        foreach ([...$this->getExtraTagValues($metadata), ...$knownTagsAsTxxx] as $key => $value) {
-            $values[$key] = $value;
+        foreach (array_replace($this->getExtraTagValues($metadata), $knownTagsAsTxxx) as $key => $value) {
+            $values[(string) $key] = $value;
         }
 
         $rows = [];
@@ -296,7 +299,7 @@ final class Writer
                     continue;
                 }
 
-                $description = self::decodeFrameText(
+                $description = Id3v2Text::decode(
                     Types::string($frame['encoding'] ?? null, 'ISO-8859-1'),
                     Types::string($frame['description'] ?? null)
                 );
@@ -328,17 +331,20 @@ final class Writer
      */
     private function buildVorbisTagData(MetadataInterface $metadata, array $info, bool $isFlac): array
     {
-        $managedTags = [
-            ...self::MANAGED_TAGS,
-            ...array_keys($metadata->getExtraTags()),
-            ...self::VORBIS_PICTURE_TAGS,
-        ];
+        $managedTags = array_map(
+            static fn(int|string $key): string => strtolower((string) $key),
+            [
+                ...self::MANAGED_TAGS,
+                ...array_keys($metadata->getExtraTags()),
+                ...self::VORBIS_PICTURE_TAGS,
+            ]
+        );
 
         $tagData = [];
 
         foreach (self::getInfoSection($info, 'tags', 'vorbiscomment') as $key => $values) {
             $key = (string) $key;
-            if (in_array($key, $managedTags, true)) {
+            if (in_array(strtolower($key), $managedTags, true)) {
                 continue;
             }
 
@@ -477,14 +483,6 @@ final class Writer
         }
 
         return $section;
-    }
-
-    private static function decodeFrameText(string $encoding, string $data): string
-    {
-        $decoded = Utils::iconv_fallback($encoding, 'UTF-8', $data);
-
-        // getID3 returns the input untouched when the decoded text is "0"
-        return $data !== '' && $decoded === $data && str_starts_with($encoding, 'UTF-16') ? '0' : $decoded;
     }
 
     /**
